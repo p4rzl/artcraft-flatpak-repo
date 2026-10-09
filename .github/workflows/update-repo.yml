@@ -27,8 +27,19 @@ jobs:
         run: |
           mkdir -p repo
           ostree init --mode=archive-z2 --repo=repo
-          # Mantiene il binding del dominio personalizzato su GitHub Pages
           echo "artcraft.p4rzl.it" > repo/CNAME
+
+          # Genera il file di configurazione per Flatpak / Discover
+          cat << 'EOF' > repo/artcraft.flatpakrepo
+[Flatpak Repo]
+Title=ArtCraft
+Url=https://artcraft.p4rzl.it/
+Homepage=https://github.com/storytold
+Comment=Unofficial Flatpak mirror for ArtCraft suite
+Description=Unofficial Flatpak repository for ArtCraft suite
+DefaultBranch=stable
+GPGKey=
+EOF
 
       - name: Scarica e importa i bundle di tutte le app
         env:
