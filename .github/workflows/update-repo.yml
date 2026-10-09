@@ -28,8 +28,9 @@ jobs:
           mkdir -p repo
           ostree init --mode=archive-z2 --repo=repo
           echo "artcraft.p4rzl.it" > repo/CNAME
+          touch repo/.nojekyll
 
-          # Genera il file di configurazione per Flatpak / Discover
+          # Configurazione per Flatpak e Discover senza firma GPG
           cat << 'EOF' > repo/artcraft.flatpakrepo
 [Flatpak Repo]
 Title=ArtCraft
@@ -38,7 +39,7 @@ Homepage=https://github.com/storytold
 Comment=Unofficial Flatpak mirror for ArtCraft suite
 Description=Unofficial Flatpak repository for ArtCraft suite
 DefaultBranch=stable
-GPGKey=
+gpg-verify=false
 EOF
 
       - name: Scarica e importa i bundle di tutte le app
@@ -55,32 +56,55 @@ EOF
             "storytold/designcraft"
           )
 
+          IMPORTED_COUNT=0
+
           for repo in "${REPOS[@]}"; do
             echo "=========================================="
             echo "Controllo release per: $repo"
             echo "=========================================="
 
-            RELEASE_JSON=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/$repo/releases/latest")
+            RELEASE_JSON=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$repo/releases/latest")
 
-            # Cerca il bundle .flatpak per architettura x86_64, altrimenti il primo .flatpak disponibile
-            BUNDLE_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".flatpak")) | select(.name | test("x86_64|x86-64")) | .browser_download_url' | head -n 1)
-            
+            # Cerca x86_64 o amd64 (case-insensitive) gestendo in sicurezza asset nulli
+            BUNDLE_URL=$(echo "$RELEASE_JSON" | jq -r '(.assets // [])[] | select(.name | endswith(".flatpak")) | select(.name | test("x86_64|x86-64|amd64"; "i")) | .browser_download_url' | head -n 1)
+
+            # Fallback: primo .flatpak disponibile escludendo architetture ARM
             if [ -z "$BUNDLE_URL" ] || [ "$BUNDLE_URL" = "null" ]; then
-              BUNDLE_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".flatpak")) | .browser_download_url' | head -n 1)
+              BUNDLE_URL=$(echo "$RELEASE_JSON" | jq -r '(.assets // [])[] | select(.name | endswith(".flatpak")) | select(.name | test("aarch64|arm64|armv7"; "i") | not) | .browser_download_url' | head -n 1)
             fi
 
             if [ -z "$BUNDLE_URL" ] || [ "$BUNDLE_URL" = "null" ]; then
-              echo "Nessun bundle .flatpak trovato per $repo. Salto..."
+              echo "Nessun bundle .flatpak compatibile trovato per $repo. Salto..."
               continue
             fi
 
             echo "Download: $BUNDLE_URL"
-            curl -L -o app.flatpak "$BUNDLE_URL"
+            if ! curl -sSfL -o app.flatpak "$BUNDLE_URL"; then
+              echo "Errore nel download di $BUNDLE_URL. Salto..."
+              rm -f app.flatpak
+              continue
+            fi
 
             echo "Importazione in OSTree..."
-            flatpak build-import-bundle repo app.flatpak
+            if flatpak build-import-bundle repo app.flatpak; then
+              IMPORTED_COUNT=$((IMPORTED_COUNT + 1))
+            else
+              echo "Errore durante l'importazione del bundle di $repo. Salto..."
+            fi
+            
             rm -f app.flatpak
           done
+
+          echo "=========================================="
+          echo "Totale pacchetti importati: $IMPORTED_COUNT"
+          echo "=========================================="
+
+          if [ "$IMPORTED_COUNT" -eq 0 ]; then
+            echo "Errore critico: nessun pacchetto importato nel repository."
+            exit 1
+          fi
 
       - name: Genera indice e metadati del repository
         run: |
