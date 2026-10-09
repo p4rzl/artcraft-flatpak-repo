@@ -42,7 +42,8 @@ jobs:
             flatpak \
             ostree \
             curl \
-            jq
+            jq \
+            python3
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
@@ -212,6 +213,79 @@ jobs:
 
           echo "Repository metadata generated successfully."
 
+      - name: Validate runtimes and generate installation links
+        env:
+          FLATPAK_USER_DIR: ${{ runner.temp }}/artcraft-runtime-check
+        run: |
+          set -euo pipefail
+
+          # Use a clean installation so preinstalled runtimes cannot hide errors.
+          flatpak remote-add --user --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+
+          python3 <<'PY'
+          import configparser
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          def output(*args):
+              return subprocess.check_output(args, text=True).strip()
+
+          refs = sorted(ref for ref in output("ostree", "refs", "--repo=repo").splitlines()
+                        if ref.startswith("app/"))
+          if len(refs) != 7:
+              raise SystemExit("Expected exactly seven application refs")
+
+          expected = {"ai.storyteller." + name for name in (
+              "photocraft", "vectorcraft", "filmcraft", "lightcraft",
+              "pdfcraft", "effectcraft", "designcraft")}
+          found = set()
+          checked = set()
+          report = ["", "## Runtime availability", "",
+                    "| Application | Required runtime |", "|---|---|"]
+          for ref in refs:
+              _, app_id, arch, branch = ref.split("/")
+              if app_id not in expected or arch != "x86_64" or branch != "stable":
+                  raise SystemExit(f"Unexpected application ref: {ref}")
+              found.add(app_id)
+              metadata = configparser.ConfigParser(interpolation=None)
+              metadata.read_string(output("ostree", "cat", "--repo=repo", ref, "/metadata"))
+              runtime = metadata.get("Application", "runtime")
+              if not re.fullmatch(r"[A-Za-z0-9_.-]+/x86_64/[A-Za-z0-9_.-]+", runtime):
+                  raise SystemExit(f"Invalid runtime for {ref}: {runtime!r}")
+              if runtime not in checked:
+                  # Full ref: check the exact architecture AND branch on stable Flathub.
+                  result = subprocess.run([
+                      "flatpak", "remote-info", "--user", "--show-ref",
+                      "flathub", "runtime/" + runtime,
+                  ], text=True, capture_output=True)
+                  if result.returncode or result.stdout.strip() != "runtime/" + runtime:
+                      print(result.stderr)
+                      raise SystemExit(
+                          f"{app_id} requires {runtime}, which could not be verified on Flathub. "
+                          "Publication blocked; the previous deployment remains online. "
+                          "Do not change the runtime version in prebuilt bundles.")
+                  checked.add(runtime)
+              report.append(f"| {app_id} | {runtime} |")
+              # RuntimeRepo is supported by .flatpakref, not .flatpakrepo.
+              # Installing this file can offer to add Flathub for missing runtimes.
+              Path(f"repo/{app_id}.flatpakref").write_text(
+                  "[Flatpak Ref]\n"
+                  f"Name={app_id}\nBranch={branch}\n"
+                  "Title=ArtCraft\n"
+                  "Url=https://artcraft.p4rzl.it/\n"
+                  "IsRuntime=false\n"
+                  "SuggestRemoteName=artcraft\n"
+                  "RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo\n",
+                  encoding="utf-8")
+          if found != expected:
+              raise SystemExit("The repository does not contain all seven expected applications")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(report) + "\n")
+          PY
+
       - name: Verify repository contents
         run: |
           set -euo pipefail
@@ -250,3 +324,4 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
