@@ -1,9 +1,17 @@
+
 name: Build and Host ArtCraft Flatpak Repo
 
 on:
   schedule:
-    - cron: '0 6 * * *' # Esegue ogni mattina alle 06:00 UTC
-  workflow_dispatch:    # Permette l'avvio manuale dalla scheda Actions
+    - cron: "0 6 * * *"
+
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/update-repo.yml"
 
 permissions:
   contents: read
@@ -11,41 +19,63 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: github-pages
   cancel-in-progress: false
 
 jobs:
   build-repo:
+    name: Build Flatpak Repository
     runs-on: ubuntu-latest
-    steps:
-      - name: Installa dipendenze Flatpak e OSTree
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak ostree curl jq
+    timeout-minutes: 60
 
-      - name: Inizializza repository OSTree
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Install dependencies
         run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            flatpak \
+            ostree \
+            curl \
+            jq
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Initialize OSTree repository
+        run: |
+          set -euo pipefail
+
           mkdir -p repo
-          ostree init --mode=archive-z2 --repo=repo
+
+          ostree init \
+            --repo=repo \
+            --mode=archive-z2
+
           echo "artcraft.p4rzl.it" > repo/CNAME
           touch repo/.nojekyll
 
-          # Configurazione per Flatpak e Discover senza firma GPG
-          cat << 'EOF' > repo/artcraft.flatpakrepo
-[Flatpak Repo]
-Title=ArtCraft
-Url=https://artcraft.p4rzl.it/
-Homepage=https://github.com/storytold
-Comment=Unofficial Flatpak mirror for ArtCraft suite
-Description=Unofficial Flatpak repository for ArtCraft suite
-DefaultBranch=stable
-gpg-verify=false
-EOF
+          printf '%s\n' \
+            '[Flatpak Repo]' \
+            'Title=ArtCraft' \
+            'Url=https://artcraft.p4rzl.it/' \
+            'Homepage=https://github.com/storytold' \
+            'Comment=Unofficial ArtCraft Flatpak repository' \
+            'Description=Community-maintained ArtCraft repository' \
+            'GPGVerify=false' \
+            > repo/artcraft.flatpakrepo
 
-      - name: Scarica e importa i bundle di tutte le app
+      - name: Download and import Flatpak bundles
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+
           REPOS=(
             "storytold/photocraft"
             "storytold/vectorcraft"
@@ -56,72 +86,167 @@ EOF
             "storytold/designcraft"
           )
 
-          IMPORTED_COUNT=0
+          IMPORTED=0
+          FAILED=0
 
-          for repo in "${REPOS[@]}"; do
-            echo "=========================================="
-            echo "Controllo release per: $repo"
-            echo "=========================================="
+          mkdir -p downloads
 
-            RELEASE_JSON=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+          for project in "${REPOS[@]}"; do
+            echo "::group::Processing $project"
+
+            echo "Checking latest release..."
+
+            if ! curl \
+              --fail \
+              --silent \
+              --show-error \
+              --location \
+              --retry 3 \
+              --retry-all-errors \
+              -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$repo/releases/latest")
+              "https://api.github.com/repos/$project/releases/latest" \
+              -o release.json; then
 
-            # Cerca x86_64 o amd64 (case-insensitive) gestendo in sicurezza asset nulli
-            BUNDLE_URL=$(echo "$RELEASE_JSON" | jq -r '(.assets // [])[] | select(.name | endswith(".flatpak")) | select(.name | test("x86_64|x86-64|amd64"; "i")) | .browser_download_url' | head -n 1)
-
-            # Fallback: primo .flatpak disponibile escludendo architetture ARM
-            if [ -z "$BUNDLE_URL" ] || [ "$BUNDLE_URL" = "null" ]; then
-              BUNDLE_URL=$(echo "$RELEASE_JSON" | jq -r '(.assets // [])[] | select(.name | endswith(".flatpak")) | select(.name | test("aarch64|arm64|armv7"; "i") | not) | .browser_download_url' | head -n 1)
-            fi
-
-            if [ -z "$BUNDLE_URL" ] || [ "$BUNDLE_URL" = "null" ]; then
-              echo "Nessun bundle .flatpak compatibile trovato per $repo. Salto..."
+              echo "::warning::Cannot fetch release for $project"
+              FAILED=$((FAILED + 1))
+              echo "::endgroup::"
               continue
             fi
 
-            echo "Download: $BUNDLE_URL"
-            if ! curl -sSfL -o app.flatpak "$BUNDLE_URL"; then
-              echo "Errore nel download di $BUNDLE_URL. Salto..."
-              rm -f app.flatpak
+            TAG=$(jq -r '.tag_name // "unknown"' release.json)
+
+            echo "Latest release: $TAG"
+
+            BUNDLE_URL=$(jq -r '
+              (.assets // [])[]
+              | select(
+                  .name
+                  | test("x86_64|x86-64|amd64"; "i")
+                )
+              | select(
+                  .name
+                  | endswith(".flatpak")
+                )
+              | .browser_download_url
+            ' release.json | head -n 1)
+
+            if [[ -z "$BUNDLE_URL" ]]; then
+              echo "::warning::No x86_64 Flatpak for $project"
+              FAILED=$((FAILED + 1))
+              echo "::endgroup::"
               continue
             fi
 
-            echo "Importazione in OSTree..."
-            if flatpak build-import-bundle repo app.flatpak; then
-              IMPORTED_COUNT=$((IMPORTED_COUNT + 1))
+            BUNDLE="downloads/$(basename "$BUNDLE_URL")"
+
+            echo "Downloading $BUNDLE"
+
+            if ! curl \
+              --fail \
+              --silent \
+              --show-error \
+              --location \
+              --retry 3 \
+              --retry-all-errors \
+              --output "$BUNDLE" \
+              "$BUNDLE_URL"; then
+
+              echo "::warning::Download failed for $project"
+              FAILED=$((FAILED + 1))
+              rm -f "$BUNDLE"
+              echo "::endgroup::"
+              continue
+            fi
+
+            echo "Importing Flatpak bundle..."
+
+            if flatpak build-import-bundle \
+              --update-appstream \
+              repo \
+              "$BUNDLE"; then
+
+              IMPORTED=$((IMPORTED + 1))
+              echo "Successfully imported $project"
             else
-              echo "Errore durante l'importazione del bundle di $repo. Salto..."
+              echo "::warning::Import failed for $project"
+              FAILED=$((FAILED + 1))
             fi
-            
-            rm -f app.flatpak
+
+            rm -f "$BUNDLE"
+
+            echo "::endgroup::"
           done
 
-          echo "=========================================="
-          echo "Totale pacchetti importati: $IMPORTED_COUNT"
-          echo "=========================================="
+          echo "Imported: $IMPORTED"
+          echo "Failed: $FAILED"
 
-          if [ "$IMPORTED_COUNT" -eq 0 ]; then
-            echo "Errore critico: nessun pacchetto importato nel repository."
+          echo "## ArtCraft Flatpak Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Imported applications: $IMPORTED" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Failed applications: $FAILED" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$IMPORTED" -eq 0 ]]; then
+            echo "::error::No Flatpak bundles imported"
             exit 1
           fi
 
-      - name: Genera indice e metadati del repository
-        run: |
-          flatpak build-update-repo --generate-static-deltas repo
+          if [[ "$FAILED" -gt 0 ]]; then
+            echo "::error::Some applications failed to import"
+            exit 1
+          fi
 
-      - name: Carica artefatto per GitHub Pages
+      - name: Generate repository metadata
+        run: |
+          set -euo pipefail
+
+          flatpak build-update-repo repo
+
+          echo "Checking repository references..."
+
+          ostree refs --repo=repo
+
+          echo "Checking repository summary..."
+
+          test -s repo/summary
+
+          echo "Repository metadata generated successfully."
+
+      - name: Verify repository contents
+        run: |
+          set -euo pipefail
+
+          test -f repo/config
+          test -s repo/summary
+          test -f repo/artcraft.flatpakrepo
+          test -f repo/CNAME
+
+          COUNT=$(ostree refs --repo=repo | grep -c '^app/' || true)
+
+          echo "Application refs: $COUNT"
+
+          if [[ "$COUNT" -lt 7 ]]; then
+            echo "::error::Expected 7 application refs"
+            exit 1
+          fi
+
+          du -sh repo
+
+      - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: repo/
 
   deploy:
+    name: Deploy Flatpak Repository
+    runs-on: ubuntu-latest
+    needs: build-repo
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build-repo
+
     steps:
-      - name: Distribuisci su GitHub Pages
+      - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
