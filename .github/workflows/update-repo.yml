@@ -1,12 +1,12 @@
-name: Build and Host Flatpak Repo
+name: Build and Host ArtCraft Flatpak Repo
 
 on:
   schedule:
-    - cron: '0 6 * * *' # Controlla ogni mattina alle 06:00 UTC
-  workflow_dispatch:    # Permette di avviarlo manualmente con un click
+    - cron: '0 6 * * *' # Esegue ogni mattina alle 06:00 UTC
+  workflow_dispatch:    # Permette l'avvio manuale dalla scheda Actions
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
@@ -18,44 +18,62 @@ jobs:
   build-repo:
     runs-on: ubuntu-latest
     steps:
-      - name: Installa Flatpak e OSTree
+      - name: Installa dipendenze Flatpak e OSTree
         run: |
           sudo apt-get update
           sudo apt-get install -y flatpak ostree curl jq
 
-      - name: Recupera URL ultima release di Artcraft
-        id: fetch-url
-        run: |
-          # Sostituisci AUTORE/REPO con il repository effettivo di Artcraft
-          UPSTREAM_REPO="AUTORE/REPO"
-          RELEASE_JSON=$(curl -s "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest")
-          BUNDLE_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".flatpak")) | .browser_download_url' | head -n 1)
-          TAG=$(echo "$RELEASE_JSON" | jq -r .tag_name)
-          
-          if [ -z "$BUNDLE_URL" ] || [ "$BUNDLE_URL" = "null" ]; then
-            echo "Nessun bundle .flatpak trovato."
-            exit 1
-          fi
-          
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "url=$BUNDLE_URL" >> $GITHUB_OUTPUT
-
-      - name: Scarica bundle e costruisci repository OSTree
+      - name: Inizializza repository OSTree
         run: |
           mkdir -p repo
-          # Inizializza il repository OSTree in modalità archivio
           ostree init --mode=archive-z2 --repo=repo
-          
-          echo "Download da: ${{ steps.fetch-url.outputs.url }}"
-          curl -L -o app.flatpak "${{ steps.fetch-url.outputs.url }}"
-          
-          # Importa il bundle nel repository locale
-          flatpak build-import-bundle repo app.flatpak
-          
-          # Genera il file di indice 'summary' richiesto dai client Flatpak
+          # Mantiene il binding del dominio personalizzato su GitHub Pages
+          echo "artcraft.p4rzl.it" > repo/CNAME
+
+      - name: Scarica e importa i bundle di tutte le app
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPOS=(
+            "storytold/photocraft"
+            "storytold/vectorcraft"
+            "storytold/filmcraft"
+            "storytold/lightcraft"
+            "storytold/pdfcraft"
+            "storytold/effectcraft"
+            "storytold/designcraft"
+          )
+
+          for repo in "${REPOS[@]}"; do
+            echo "=========================================="
+            echo "Controllo release per: $repo"
+            echo "=========================================="
+
+            RELEASE_JSON=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/$repo/releases/latest")
+
+            # Cerca il bundle .flatpak per architettura x86_64, altrimenti il primo .flatpak disponibile
+            BUNDLE_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".flatpak")) | select(.name | test("x86_64|x86-64")) | .browser_download_url' | head -n 1)
+            
+            if [ -z "$BUNDLE_URL" ] || [ "$BUNDLE_URL" = "null" ]; then
+              BUNDLE_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".flatpak")) | .browser_download_url' | head -n 1)
+            fi
+
+            if [ -z "$BUNDLE_URL" ] || [ "$BUNDLE_URL" = "null" ]; then
+              echo "Nessun bundle .flatpak trovato per $repo. Salto..."
+              continue
+            fi
+
+            echo "Download: $BUNDLE_URL"
+            curl -L -o app.flatpak "$BUNDLE_URL"
+
+            echo "Importazione in OSTree..."
+            flatpak build-import-bundle repo app.flatpak
+            rm -f app.flatpak
+          done
+
+      - name: Genera indice e metadati del repository
+        run: |
           flatpak build-update-repo --generate-static-deltas repo
-          
-          rm app.flatpak
 
       - name: Carica artefatto per GitHub Pages
         uses: actions/upload-pages-artifact@v3
