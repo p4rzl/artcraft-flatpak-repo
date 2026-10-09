@@ -86,7 +86,7 @@ sudo apt install flatpak
 
 ### Add Flathub
 
-ArtCraft applications may require runtimes distributed through Flathub.
+**Flathub is required:** ArtCraft distributes applications; their runtimes are supplied by Flathub. Adding ArtCraft alone does not add Flathub automatically.
 
 Add Flathub to your user configuration:
 
@@ -94,7 +94,9 @@ Add Flathub to your user configuration:
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 ```
 
-If you already have Flathub configured, you can skip this step.
+Use the same installation scope for both sources: `--user` in this guide. If you install ArtCraft system-wide, configure Flathub with `--system` too. Do not skip this step just because Discover shows Flathub under a different installation.
+
+Flatpak downloads the required runtime when you install an application. You do not need to install the SDK or select a different runtime version manually.
 
 ---
 
@@ -107,6 +109,7 @@ The recommended installation method is to add the ArtCraft repository as a Flatp
 Run:
 
 ```bash
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak remote-add --user --if-not-exists artcraft https://artcraft.p4rzl.it/artcraft.flatpakrepo
 ```
 
@@ -200,6 +203,18 @@ It supports installing and updating software from multiple sources, including Fl
 
 ArtCraft can be integrated with Discover so that users can manage its applications without relying on terminal commands.
 
+### Required first step — Enable Flathub
+
+In **Discover → Settings → Flatpak**, check that **Flathub is enabled in the same installation as ArtCraft** (user or system).
+
+If it is missing, choose **Add Source** in that installation and enter:
+
+```text
+https://dl.flathub.org/repo/flathub.flatpakrepo
+```
+
+Accept the prompts, then add ArtCraft below. A Flathub entry that is disabled, filtered to exclude the runtime, or configured only in a different installation may not provide the required dependency.
+
 ### Method 1 — Add ArtCraft directly in Discover
 
 **Step 1 — Open KDE Discover**
@@ -260,6 +275,28 @@ Some desktop environments and KDE installations support opening `.flatpakrepo` f
 
 > [!NOTE]
 > If your system does not associate `.flatpakrepo` files with Discover, use Method 1 or the terminal installation instructions instead.
+
+### Method 3 — Install using an application link
+
+After the updated workflow has deployed successfully, these `.flatpakref` files are available. Download one and open it with Discover:
+
+| Application | Installation file |
+|---|---|
+| LightCraft | [Install LightCraft](https://artcraft.p4rzl.it/ai.storyteller.lightcraft.flatpakref) |
+| PhotoCraft | [Install PhotoCraft](https://artcraft.p4rzl.it/ai.storyteller.photocraft.flatpakref) |
+| VectorCraft | [Install VectorCraft](https://artcraft.p4rzl.it/ai.storyteller.vectorcraft.flatpakref) |
+| FilmCraft | [Install FilmCraft](https://artcraft.p4rzl.it/ai.storyteller.filmcraft.flatpakref) |
+| PdfCraft | [Install PdfCraft](https://artcraft.p4rzl.it/ai.storyteller.pdfcraft.flatpakref) |
+| EffectCraft | [Install EffectCraft](https://artcraft.p4rzl.it/ai.storyteller.effectcraft.flatpakref) |
+| DesignCraft | [Install DesignCraft](https://artcraft.p4rzl.it/ai.storyteller.designcraft.flatpakref) |
+
+These files include `RuntimeRepo`, pointing to Flathub, so a supporting installer can offer to add the runtime source. Accept that prompt. If Discover does not offer it, add Flathub using the required first step above. This field belongs to `.flatpakref`; adding it to `artcraft.flatpakrepo` would not configure dependencies.
+
+Terminal equivalent for PhotoCraft:
+
+```bash
+flatpak install --user --from https://artcraft.p4rzl.it/ai.storyteller.photocraft.flatpakref
+```
 
 ### Troubleshooting KDE Discover integration
 
@@ -339,7 +376,11 @@ The automation is configured to:
 3. Download the upstream bundles.
 4. Import them into an OSTree repository.
 5. Generate Flatpak repository metadata.
-6. Publish the resulting repository through GitHub Pages.
+6. Read each imported application's runtime requirement and verify its exact ID, architecture and branch on stable Flathub using a clean Flatpak configuration.
+7. Generate application `.flatpakref` installation files with a Flathub runtime-source hint.
+8. Publish the resulting repository through GitHub Pages only if every check succeeds.
+
+If any required runtime is unavailable or Flathub cannot be reached, publication stops and the previous deployment remains online. The workflow records verified runtime requirements in its run summary. It does not rewrite dependencies in prebuilt bundles or prove that applications launch correctly. Users still need Flathub enabled locally; changing the workflow does not alter existing client configurations.
 
 ### Update Schedule
 
@@ -438,13 +479,22 @@ If the application is missing, it may not have been imported successfully during
 
 ### Dependencies cannot be resolved
 
-Verify that Flathub is configured:
+An error such as `requires the runtime org.freedesktop.Platform/x86_64/26.08 which was not found` means Flatpak could not resolve that exact dependency from the available sources. It does not by itself mean the runtime version is invalid.
+
+For the user installation used throughout this guide:
 
 ```bash
-flatpak remotes --user
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak remote-modify --user --enable flathub
+flatpak remote-info --user flathub runtime/org.freedesktop.Platform/x86_64/26.08
+flatpak install --user artcraft ai.storyteller.photocraft
 ```
 
-If necessary, add Flathub using the instructions in the Prerequisites section.
+The runtime check above matches the reported PhotoCraft dependency; if an error names another runtime, check that exact reference instead. Close and reopen Discover after adding the source.
+
+If ArtCraft is installed system-wide, use `--system` consistently instead of `--user`. Check both scopes with `flatpak remotes --show-details`. If `remote-info` still fails, inspect its error and the Flathub URL, network access and any repository filter before retrying. `--if-not-exists` does not repair an existing remote with an incorrect URL or filter. Do not replace `26.08` with an older version or edit the imported app metadata to bypass the requirement.
+
+Refreshing AppStream only refreshes the catalog; it does not add a missing runtime source. Existing users must add or enable Flathub once even after the updated ArtCraft workflow is deployed.
 
 ### Applications do not appear in KDE Discover
 
@@ -495,3 +545,4 @@ This repository is intended to improve accessibility and convenience for Linux u
 ---
 
 *ArtCraft Flatpak Repository — Simplifying ArtCraft installation and updates on Linux.*
+
