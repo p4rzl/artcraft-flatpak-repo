@@ -1,0 +1,74 @@
+name: Build and Host Flatpak Repo
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # Controlla ogni mattina alle 06:00 UTC
+  workflow_dispatch:    # Permette di avviarlo manualmente con un click
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-repo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Installa Flatpak e OSTree
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak ostree curl jq
+
+      - name: Recupera URL ultima release di Artcraft
+        id: fetch-url
+        run: |
+          # Sostituisci AUTORE/REPO con il repository effettivo di Artcraft
+          UPSTREAM_REPO="AUTORE/REPO"
+          RELEASE_JSON=$(curl -s "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest")
+          BUNDLE_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".flatpak")) | .browser_download_url' | head -n 1)
+          TAG=$(echo "$RELEASE_JSON" | jq -r .tag_name)
+          
+          if [ -z "$BUNDLE_URL" ] || [ "$BUNDLE_URL" = "null" ]; then
+            echo "Nessun bundle .flatpak trovato."
+            exit 1
+          fi
+          
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "url=$BUNDLE_URL" >> $GITHUB_OUTPUT
+
+      - name: Scarica bundle e costruisci repository OSTree
+        run: |
+          mkdir -p repo
+          # Inizializza il repository OSTree in modalità archivio
+          ostree init --mode=archive-z2 --repo=repo
+          
+          echo "Download da: ${{ steps.fetch-url.outputs.url }}"
+          curl -L -o app.flatpak "${{ steps.fetch-url.outputs.url }}"
+          
+          # Importa il bundle nel repository locale
+          flatpak build-import-bundle repo app.flatpak
+          
+          # Genera il file di indice 'summary' richiesto dai client Flatpak
+          flatpak build-update-repo --generate-static-deltas repo
+          
+          rm app.flatpak
+
+      - name: Carica artefatto per GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo/
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build-repo
+    steps:
+      - name: Distribuisci su GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
